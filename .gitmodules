@@ -1,0 +1,3 @@
+[submodule "PF_silent_disco"]
+	path = PF_silent_disco
+	url = https://github.com/dendersen/PF_silent_disco.git
