@@ -5,6 +5,7 @@ import csv
 import sys
 from pathlib import Path
 import torch
+import subprocess
 
 from VideoStream_python.streamInterface import StreamReader
 from frame.FrameSource import VideoSource, Frame
@@ -98,20 +99,22 @@ def classify_headsets(crops, threshold=0.5, batch_size=4):
 
     return probabilities[:, 1].numpy()
 
-def save_distribution(history, path="distributions.csv"):
-    """Save all interval distributions."""
+def save_distribution(row, path):
+    fields = [
+        "interval", "timestamp", "duration",
+        "red", "green", "blue",
+        "red_pct", "green_pct", "blue_pct"
+    ]
 
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "interval", "timestamp",
-                "red", "green", "blue"
-            ]
-        )
-        writer.writeheader()
-        writer.writerows(history)
+    new_file = not path.exists()
 
+    with open(path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+
+        if new_file:
+            writer.writeheader()
+
+        writer.writerow(row)
 
 
 if __name__ == "__main__":
@@ -120,88 +123,141 @@ if __name__ == "__main__":
     SAMPLE_FPS = 2
     CROP_SIZE = 96
     CONFIDENCE_THRESHOLD = 0.7
-    DEBUG = True
+    BATCH_SIZE = 32
+    DEBUG = False
+
+
+    CSV_NAME = "silent_disco"
+    OUTPUT_DIR = Path("results")
+
 
     path = "/Users/aleks/Downloads/PF_silent_disco/GX010808.MP4"
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    csv_path = OUTPUT_DIR / f"{CSV_NAME}_{time.time_ns()}.csv"
 
-    stream = StreamReader(path, StreamReader.STREAM_TYPE_FILE)
-    video = VideoSource(path=path)
+    source = StreamReader(path, StreamReader.STREAM_TYPE_FILE)
+    source = VideoSource(path=path)
+
     selector = FrameSelector()
     detector = RGBBlobDetector()
 
-    history = []
     interval_index = 0
+    print(f"\nSaving results to: {csv_path}")
 
-    result = selector.best_frame_in_interval(video, duration=30, sample_fps=SAMPLE_FPS, debug=False)
-    if result is None:
-        raise RuntimeError("Result is none")
+    try:
+        while True:
+            print(f"\n{'=' * 50}")
+            print(f"INTERVAL {interval_index + 1}")
+            print(f"{'=' * 50}")
 
-    frame, score = result
-    print(f"Selected frame: {frame.frame_number}")
-    print(f"Time: {frame.timestamp:.2f}s")
-    print(f"Score: {score:.3f}")
+            # Select representative frame from next interval
+            result = selector.best_frame_in_interval(source, duration=INTERVAL, sample_fps=SAMPLE_FPS, debug=DEBUG)
 
+            if result is None:
+                print("\nEnd of video reached.")
+                break
 
-    candidates = {}
-    rejected = {}
-    all_crops = {}
-    counts = {}
-    masks = detector.segment_colors(frame.image)
+            frame, score = result
 
-    for color, mask in masks.items():
-        print(f"\nProcessing {color}...")
+            print(f"Selected frame: {frame.frame_number}")
+            print(f"Time: {frame.timestamp:.2f}s")
+            print(f"Score: {score:.3f}")
 
-        cleaned = detector.clean_mask(mask)
-        blobs = detector.extract_blob_features(cleaned)
-        filtered_blobs = detector.filter_blobs(blobs)
-        blobs = detector.add_local_contrast_features(frame.image, filtered_blobs, color, debug=False)
-        blobs = detector.filter_led_blobs(
-            blobs,
-            delta_v_range=(40, 200),
-            delta_dominance_range=(40, 200)
-        )
+            candidates = {}
+            rejected = {}
+            all_crops = {}
+            counts = {}
 
-        crops = detector.get_blob_crops(frame.image, blobs, scale=6)
+            masks = detector.segment_colors(frame.image)
 
-        # Remove invalid crops before inference
-        crops = [crop for crop in crops if crop is not None and crop.size > 0]
-        print(f"  Candidate blobs: {len(crops)}")
+            for color, mask in masks.items():
+                print(f"\nProcessing {color}...")
 
-        # Presence model
-        probabilities = classify_headsets(crops, batch_size=32)
+                cleaned = detector.clean_mask(mask)
+                blobs = detector.extract_blob_features(cleaned)
+                filtered_blobs = detector.filter_blobs(blobs)
 
-        accepted = []
-        rejected_crops = []
+                blobs = detector.add_local_contrast_features(frame.image, filtered_blobs, color, debug=DEBUG)
 
-        for crop, probability in zip(crops, probabilities):
-            item = (crop, float(probability))
+                blobs = detector.filter_led_blobs(
+                    blobs,
+                    delta_v_range=(40, 200),
+                    delta_dominance_range=(40, 200)
+                )
 
-            if probability >= CONFIDENCE_THRESHOLD:
-                accepted.append(item)
-            else:
-                rejected_crops.append(item)
+                crops = detector.get_blob_crops(frame.image, blobs, scale=6)
 
-        all_crops[color] = list(zip(crops, probabilities))
-        candidates[color] = accepted
-        rejected[color] = rejected_crops
-        counts[color] = len(accepted)
+                crops = [crop for crop in crops if crop is not None and crop.size > 0]
 
-        print(f"  Accepted: {len(accepted)}")
-        print(f"  Rejected: {len(rejected_crops)}")
+                print(f"  Candidate blobs: {len(crops)}")
 
+                # Presence classification
+                probabilities = classify_headsets(crops, batch_size=BATCH_SIZE)
 
-    total = sum(counts.values())
+                accepted = []
+                rejected_crops = []
 
-    distribution = {
-        color: count / total * 100 if total > 0 else 0
-        for color, count in counts.items()
-    }
+                for crop, probability in zip(crops, probabilities):
+                    item = (crop, float(probability))
 
-    print(f"\nTotal headsets: {total}")
-    print("Color distribution:")
+                    if probability >= CONFIDENCE_THRESHOLD:
+                        accepted.append(item)
+                    else:
+                        rejected_crops.append(item)
 
-    for color in counts:
-        print(f"  {color.capitalize()}: {counts[color]} ({distribution[color]:.1f}%)")
+                if DEBUG:
+                    all_crops[color] = list(zip(crops, probabilities))
+                    candidates[color] = accepted
+                    rejected[color] = rejected_crops
+
+                counts[color] = len(accepted)
+
+                print(f"  Accepted: {len(accepted)}")
+                print(f"  Rejected: {len(rejected_crops)}")
+
+            # Calculate distribution
+            total = sum(counts.values())
+
+            distribution = {
+                color: count / total * 100 if total else 0
+                for color, count in counts.items()
+            }
+
+            print(f"\nTotal detected headsets: {total}")
+            print("Color distribution:")
+
+            for color in ("red", "green", "blue"):
+                print(
+                    f"  {color.capitalize():5s}: "
+                    f"{counts.get(color, 0):4d} "
+                    f"({distribution.get(color, 0):5.1f}%)"
+                )
+
+            # Save interval immediately
+            row = {
+                "interval": interval_index,
+                "timestamp": frame.timestamp,
+                "duration": INTERVAL,
+                "red": counts.get("red", 0),
+                "green": counts.get("green", 0),
+                "blue": counts.get("blue", 0),
+                "red_pct": distribution.get("red", 0),
+                "green_pct": distribution.get("green", 0),
+                "blue_pct": distribution.get("blue", 0),
+            }
+
+            save_distribution(row, csv_path)
+            print(f"Saved interval {interval_index + 1} to CSV")
+
+            if DEBUG:
+                show_crop_collage(all_crops)
+                show_crop_collage(candidates)
+                show_crop_collage(rejected)
+
+            interval_index += 1
+
+    except KeyboardInterrupt:
+        print("\nProcessing interrupted by user.")
 
     
 
