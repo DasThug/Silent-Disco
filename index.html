@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RGB Blob Sampler</title>
+<style>
+:root{color-scheme:dark;font-family:Inter,system-ui,Segoe UI,sans-serif}*{box-sizing:border-box}body{margin:0;background:#12151b;color:#ebedf2}
+header{height:58px;display:flex;align-items:center;gap:14px;padding:0 18px;background:#1c2029;border-bottom:1px solid #313845}
+h1{font-size:16px;margin:0 20px 0 0}button,select,input{font:inherit}button,select{background:#303743;border:1px solid #515969;color:#f0f1f5;border-radius:7px;padding:7px 11px;cursor:pointer}button:hover{background:#40495a}button:disabled{opacity:.4;cursor:default}button.primary{background:#4f72c9;border-color:#7391da}button.active{background:#596b84;border-color:#a5b7d0}header .spacer{flex:1}header .tiny{font-size:12px;color:#a6acb9}
+main{display:grid;grid-template-columns:minmax(0,1fr) 320px;height:calc(100vh - 95px)}#viewport{position:relative;overflow:hidden;background:#080a0f;cursor:grab;touch-action:none}#viewport.dragging{cursor:grabbing}#canvas{position:absolute;inset:0;width:100%;height:100%}aside{background:#1b2029;border-left:1px solid #353d4a;padding:18px;overflow:auto}aside h2{font-size:15px;margin:0 0 18px}.muted{font-size:12px;color:#a5adbb}.stat{padding:10px 0;border-bottom:1px solid #333945}.stat span{float:right;color:#fff}.keys{display:grid;grid-template-columns:1fr auto;gap:9px;font-size:13px;margin-top:12px}.keys strong{font-variant-numeric:tabular-nums}.colorbar{display:flex;gap:6px}#features{font-size:13px;line-height:1.8;overflow-wrap:anywhere}.note{margin-top:14px;color:#abb3c1;font-size:12px;line-height:1.5}footer{height:37px;display:flex;align-items:center;justify-content:space-between;padding:0 17px;color:#b9c1cd;font-size:12px;background:#1c2029;border-top:1px solid #313845}#status.error{color:#ff9999}#loading{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);padding:12px 18px;border-radius:8px;background:#292f3b;display:none;pointer-events:none}label{display:flex;gap:6px;align-items:center;font-size:13px}input[type=range]{width:85px}#frame{max-width:250px}.frame-nav{display:flex;align-items:center;gap:7px}
+@media(max-width:850px){main{grid-template-columns:minmax(0,1fr) 230px}header{gap:6px;padding:0 8px}h1{display:none}aside{padding:12px}}
+</style></head><body>
+<header>
+<h1>RGB Blob Sampler</h1>
+<div class="frame-nav"><button id="prev" title="Previous frame">◀</button><select id="frame"></select><button id="next" title="Next frame">▶</button></div>
+<div class="colorbar"><button data-color="red">Red</button><button data-color="green">Green</button><button data-color="blue">Blue</button></div>
+<button id="fit" title="Fit whole image">Fit</button><button id="native" title="1 image pixel per CSS pixel">100%</button>
+<label>Boxes <input id="opacity" type="range" min="0" max="100" value="60"></label>
+<span class="spacer"></span><button id="clear">Clear</button><button class="primary" id="save">Save selected</button>
+</header>
+<main><section id="viewport"><canvas id="canvas"></canvas><div id="loading">Loading segmentation…</div></section>
+<aside>
+<h2>Blob Inspector</h2>
+<div class="stat">Frame <span id="frameNum">—</span></div><div class="stat">Color <span id="colorName">—</span></div><div class="stat">Detected blobs <span id="blobCount">0</span></div><div class="stat">Selected <span id="selectedCount">0</span></div><div class="stat">Already saved <span id="savedCount">0</span></div>
+<h2 style="margin-top:22px">Hovered blob</h2><div id="features" class="muted">Move over a bounding box to inspect its geometry. Click to select or deselect.</div>
+<div class="note">Mouse wheel: zoom at cursor<br>Left drag: pan image<br>Click a box: select/deselect<br>Fit: show entire image<br>100%: native image resolution<br>Ctrl + S: save selected<br>← / →: previous/next image</div>
+<div class="note">White boxes are shown at 60% opacity. Selected boxes receive a thin gold outline. Only newly selected blobs are passed to local contrast calculation.</div>
+</aside></main><footer><span id="status">Ready</span><span id="zoom">100%</span></footer>
+<script>
+const $=id=>document.getElementById(id), canvas=$('canvas'),ctx=canvas.getContext('2d'),vp=$('viewport');
+let frames=[], index=0,color='red',blobs=[],saved=new Set(),selected=new Set(),img=null;
+let zoom=1,panX=0,panY=0,hover=null,drag=null,loadToken=0,busy=false;
+const setStatus=(text,error=false)=>{$('status').textContent=text;$('status').className=error?'error':'';};
+function resize(){const r=vp.getBoundingClientRect(),d=window.devicePixelRatio||1;canvas.width=Math.round(r.width*d);canvas.height=Math.round(r.height*d);ctx.setTransform(d,0,0,d,0,0);draw();}
+function dimensions(){return {w:vp.clientWidth,h:vp.clientHeight}}
+function fit(){if(!img)return;const{w,h}=dimensions();zoom=Math.min(w/img.naturalWidth,h/img.naturalHeight);panX=(w-img.naturalWidth*zoom)/2;panY=(h-img.naturalHeight*zoom)/2;draw()}
+function native(){if(!img)return;const {w,h}=dimensions();const cx=(w/2-panX)/zoom,cy=(h/2-panY)/zoom;zoom=1;panX=w/2-cx;panY=h/2-cy;draw()}
+function screenToImage(x,y){return [(x-panX)/zoom,(y-panY)/zoom]}
+function findBlob(x,y){const [ix,iy]=screenToImage(x,y);let found=null,best=Infinity;for(let i=0;i<blobs.length;i++){const [bx,by,bw,bh]=blobs[i].bbox;if(ix>=bx&&ix<bx+bw&&iy>=by&&iy<by+bh&&bw*bh<best){best=bw*bh;found=i}}return found}
+function draw(){const {w,h}=dimensions();ctx.clearRect(0,0,w,h);if(!img)return;ctx.save();ctx.translate(panX,panY);ctx.scale(zoom,zoom);ctx.drawImage(img,0,0);
+const alpha=Number($('opacity').value)/100;
+// Cull boxes outside the visible viewport so even thousands stay responsive.
+const left=-panX/zoom,top=-panY/zoom,right=(w-panX)/zoom,bottom=(h-panY)/zoom;
+for(let i=0;i<blobs.length;i++){
+ const [x,y,bw,bh]=blobs[i].bbox;
+ if(x>right||y>bottom||x+bw<left||y+bh<top)continue;
+ ctx.lineWidth=1/zoom;ctx.strokeStyle=`rgba(255,255,255,${alpha})`;ctx.strokeRect(x+.5/zoom,y+.5/zoom,bw,bh);
+ if(saved.has(i)){ctx.strokeStyle='rgba(80,225,150,.85)';ctx.lineWidth=2/zoom;ctx.strokeRect(x,y,bw,bh)}
+ if(selected.has(i)){ctx.strokeStyle='#ffd166';ctx.lineWidth=2/zoom;ctx.strokeRect(x,y,bw,bh)}
+ if(hover===i){ctx.strokeStyle='#ffffff';ctx.lineWidth=2/zoom;ctx.strokeRect(x,y,bw,bh)}
+}
+ctx.restore();$('zoom').textContent=`${(zoom*100).toFixed(0)}% · ${img.naturalWidth}×${img.naturalHeight}`;
+}
+function updatePanel(){
+ $('frameNum').textContent=`${index+1} / ${frames.length}`;$('colorName').textContent=color.toUpperCase();
+ $('blobCount').textContent=blobs.length;$('selectedCount').textContent=selected.size;$('savedCount').textContent=saved.size;
+ $('prev').disabled=index===0;$('next').disabled=index===frames.length-1;
+ document.querySelectorAll('[data-color]').forEach(b=>b.classList.toggle('active',b.dataset.color===color));
+ const b=hover===null?null:blobs[hover];
+ if(!b){$('features').textContent='Move over a bounding box to inspect its geometry. Click to select or deselect.';return}
+ const fields={'Blob ID':b.id,'Center':b.center.join(', '),'BBox':b.bbox.join(', '),
+ 'Area':b.area,'Perimeter':b.perimeter,'Circularity':b.circularity,'Aspect ratio':b.aspect_ratio,'Extent':b.extent,'Solidity':b.solidity};
+ $('features').innerHTML='<div class="keys">'+Object.entries(fields).map(([k,v])=>`<span>${k}</span><strong>${typeof v==='number'?Number(v.toFixed(3)):v}</strong>`).join('')+'</div>';
+}
+async function load(){
+ const token=++loadToken;busy=true;$('loading').style.display='block';setStatus('Loading image and geometric features…');hover=null;selected.clear();blobs=[];saved.clear();img=null;draw();
+ try{
+  const [response,image]=await Promise.all([
+   fetch(`/api/frame?index=${index}&color=${color}`),
+   new Promise((resolve,reject)=>{let im=new Image();im.onload=()=>resolve(im);im.onerror=()=>reject(Error('PNG load failed'));im.src=`/image?index=${index}`})
+  ]);
+  const data=await response.json();if(!response.ok)throw Error(data.error||'Backend error');if(token!==loadToken)return;
+  img=image;blobs=data.blobs;saved=new Set(data.saved);fit();updatePanel();setStatus(`${data.filename} · ${color} · ${blobs.length} blobs`);
+ }catch(e){if(token===loadToken)setStatus(e.message,true)}
+ finally{if(token===loadToken){busy=false;$('loading').style.display='none';}}
+}
+async function save(){if(busy)return;const ids=[...selected].filter(i=>!saved.has(i));if(!ids.length){setStatus('No new selected blobs to save');return}
+ busy=true;$('save').disabled=true;setStatus(`Calculating contrast for ${ids.length} selected blobs…`);
+ try{const res=await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index,color,ids})});const data=await res.json();if(!res.ok)throw Error(data.error||'Save failed');ids.forEach(i=>saved.add(i));selected.clear();updatePanel();draw();setStatus(`Saved ${data.added} new samples to CSV (${data.total_saved} total)`)}
+ catch(e){setStatus(e.message,true)}finally{busy=false;$('save').disabled=false}}
+function navigate(newIndex,newColor){if(busy)return;index=newIndex;color=newColor;$('frame').value=String(index);load()}
+vp.addEventListener('pointerdown',e=>{if(!img)return;vp.setPointerCapture(e.pointerId);drag={x:e.clientX,y:e.clientY,panX,panY,moved:false};vp.classList.add('dragging')});
+vp.addEventListener('pointermove',e=>{if(!img)return;const r=vp.getBoundingClientRect();if(drag){const dx=e.clientX-drag.x,dy=e.clientY-drag.y;if(Math.hypot(dx,dy)>4)drag.moved=true;if(drag.moved){panX=drag.panX+dx;panY=drag.panY+dy;draw()}return}const next=findBlob(e.clientX-r.left,e.clientY-r.top);if(next!==hover){hover=next;updatePanel();draw()}});
+vp.addEventListener('pointerup',e=>{if(!drag)return;const moved=drag.moved;drag=null;vp.classList.remove('dragging');if(!moved&&img){const r=vp.getBoundingClientRect(),i=findBlob(e.clientX-r.left,e.clientY-r.top);if(i!==null){selected.has(i)?selected.delete(i):selected.add(i);hover=i;updatePanel();draw()}}});
+vp.addEventListener('pointerleave',()=>{if(!drag){hover=null;updatePanel();draw()}});
+vp.addEventListener('wheel',e=>{e.preventDefault();if(!img)return;const r=vp.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;const [ix,iy]=screenToImage(x,y);zoom=Math.max(.02,Math.min(32,zoom*Math.exp(-e.deltaY*.0015)));panX=x-ix*zoom;panY=y-iy*zoom;draw()},{passive:false});
+$('fit').onclick=fit;$('native').onclick=native;$('opacity').oninput=draw;$('save').onclick=save;
+$('clear').onclick=()=>{selected.clear();updatePanel();draw()};$('prev').onclick=()=>navigate(Math.max(0,index-1),color);$('next').onclick=()=>navigate(Math.min(frames.length-1,index+1),color);
+$('frame').onchange=e=>navigate(Number(e.target.value),color);document.querySelectorAll('[data-color]').forEach(b=>b.onclick=()=>navigate(index,b.dataset.color));
+window.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();save()}else if(e.target.tagName!=='SELECT'&&!e.ctrlKey){if(e.key==='ArrowLeft')navigate(Math.max(0,index-1),color);if(e.key==='ArrowRight')navigate(Math.min(frames.length-1,index+1),color)}});
+new ResizeObserver(resize).observe(vp);
+(async()=>{try{const res=await fetch('/api/frames'),data=await res.json();if(!res.ok)throw Error(data.error);frames=data.frames;frames.forEach((name,i)=>{const o=document.createElement('option');o.value=i;o.textContent=name;$('frame').appendChild(o)});if(frames.length)load();else setStatus('No PNG frames found',true)}catch(e){setStatus(e.message,true)}})();
+</script></body></html>
