@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 from frame import FrameSource
-from VideoStream_python.streaminterface import StreamReader
+from VideoStream_python.streamInterface import StreamReader
 
 import time
 

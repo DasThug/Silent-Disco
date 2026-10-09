@@ -3,7 +3,7 @@ import numpy as np
 import time
 import csv
 
-from VideoStream_python.streaminterface import StreamReader
+from VideoStream_python.streamInterface import StreamReader
 from frame.FrameSource import VideoSource, Frame
 from frame.frame_selection import FrameSelector
 from analysis.color_segmentation import RGBBlobDetector
@@ -79,10 +79,10 @@ def save_distribution(history, path="distributions.csv"):
 if __name__ == "__main__":
     INTERVAL = 30
     VIDEO_FPS = 30
-    SAMPLE_FPS = 5
+    SAMPLE_FPS = 2
     CROP_SIZE = 96
 
-    path = r"C:\Users\light\Downloads\pf\PF_silent_disco\GX010808.MP4"
+    path = "/Users/aleks/Downloads/PF_silent_disco/GX010808.MP4"
 
     stream = StreamReader(path, StreamReader.STREAM_TYPE_FILE)
     video = VideoSource(path=path)
@@ -92,7 +92,7 @@ if __name__ == "__main__":
     history = []
     interval_index = 0
 
-    result = selector.best_frame_in_interval(video, duration=30, sample_fps=2)
+    result = selector.best_frame_in_interval(video, duration=30, sample_fps=SAMPLE_FPS)
     if result is None:
         raise RuntimeError("Result is none")
 
