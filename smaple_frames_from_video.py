@@ -6,7 +6,7 @@ import numpy as np
 from pathlib import Path
 
 
-path = r"C:\Users\light\Downloads\pf\PF_silent_disco\GX010808.MP4"
+path = "/Users/aleks/Downloads/PF_silent_disco/GX030808.MP4"
 
 selector = FrameSelector()
 video = VideoSource(path)
